@@ -5,9 +5,10 @@ description: Run the grafana org's supply-chain checks against a Node.js reposit
 
 # Supply-chain check & fix
 
-Run the supply-chain check against a target Node.js repository and walk the user through fixing every critical finding.
+Run the supply-chain check against a target Node.js repository and walk the user through fixing every critical and advisory finding.
 
-> **Scope note (PR1):** the CLI currently ships only the four post-install-script-disabling checks (`packagemanager-pinned`, `npmrc-correct`, `pnpm-workspace-correct`, `yarnrc-correct`). Other checks listed in earlier drafts (lockfile, install-not-ci, npx-confusion, OIDC, cache-poisoning, registry-audit, Go support) ship in follow-up PRs.
+> **Scope note (PR2):** the CLI currently ships the full JS check set
+> (critical + advisory). Go-ecosystem support ships in a follow-up PR.
 
 ## Locate the CLI
 
@@ -53,11 +54,18 @@ JSON shape (see `supply-chain/src/io.ts`):
 }
 ```
 
+## Mode flags
+
+Useful flags to pass after the `--` separator:
+
+- `--no-audit` — skip the network-dependent `registry-audit` check (offline, faster). Use this when the user is iterating on static fixes.
+- `--audit-only` — only run the audit (after fixing static issues, before a release).
+
 ## Present and fix
 
-Show the user a one-line summary: `N critical across K roots`. Then for each finding, in order (grouped by `root`):
+Show the user a one-line summary: `N critical, M advisory across K roots`. Then for each finding, in order (critical first, then advisory, grouped by `root`):
 
-1. **Read the canonical fix guide** at `<CLI-DIR>/docs/checks/js/<check_id>.md`. The doc has the "Why," the precise fix recipe, and important subtleties. Always read this before acting — the `fix:` field on the finding is a one-liner; the doc has the full picture. The finding's `doc_link` field is also a direct URL to this same file.
+1. **Read the canonical fix guide** at `<CLI-DIR>/docs/checks/js/<check_id>.md`. The doc has the "Why," the precise fix recipe, and important subtleties (e.g. "even an empty list is a violation" for `yarnrc-correct`'s `approvedGitRepositories`). Always read this before acting — the `fix:` field on the finding is a one-liner; the doc has the full picture. The finding's `doc_link` field is also a direct URL to this same file.
 
 2. **Inspect the target's current state** of the files the fix would touch. Don't assume the file is missing just because a key is missing — partial configs are common.
 
@@ -65,10 +73,17 @@ Show the user a one-line summary: `N critical across K roots`. Then for each fin
 
    | Check | Mechanical → apply directly | Judgement → ask first |
    |---|---|---|
-   | `npmrc-correct` | ✅ add/fix `ignore-scripts=true` in `.npmrc` | |
-   | `pnpm-workspace-correct` | ✅ add/fix `strictDepBuilds: true` in `pnpm-workspace.yaml` | |
-   | `yarnrc-correct` | ✅ add/fix `enableScripts: false` in `.yarnrc.yml` | |
-   | `packagemanager-pinned` | ✅ add the field at the minimum version | bumping major versions if pinning to an existing higher version |
+   | `npmrc-correct` | ✅ add/fix keys in `.npmrc` | |
+   | `pnpm-workspace-correct` | ✅ add/fix keys in `pnpm-workspace.yaml` | |
+   | `yarnrc-correct` | ✅ add/fix keys; remove `approvedGitRepositories` block | |
+   | `packagemanager-pinned` | ✅ add the field at the minimum version | bumping major versions if pinning to existing higher version |
+   | `lockfile-committed` | needs `npm/pnpm/yarn install` + `git add` — confirm before running install | |
+   | `lockfile-conflict` | | ✅ ask which manager to keep |
+   | `install-not-ci` | ✅ rewrite each occurrence to the strict form | |
+   | `npx-confusion` | | ✅ ask for the correct package/scope per occurrence |
+   | `oidc-publishing` | | ✅ workflow restructure + registry-side trust config — guide, don't auto-edit |
+   | `cache-poisoning-publish` | ✅ add `package-manager-cache: false` to setup-node | |
+   | `registry-audit` | | ✅ each finding is a CVE in a specific dep — ask for upgrade strategy |
 
 4. **Apply the fix** with the `Edit` tool. Reference the finding's `doc_link` in your commit message / progress note if you're producing one.
 
@@ -78,7 +93,7 @@ Show the user a one-line summary: `N critical across K roots`. Then for each fin
 
 After applying fixes, re-run the same command and confirm the findings cleared. If new findings appeared (fixing one config exposed another), iterate — typically one more pass clears them.
 
-Report the final state: `passed`, or `still N critical` with the remaining list.
+Report the final state: `passed`, or `still N critical / M advisory` with the remaining list.
 
 ## Suppression instead of fix
 
