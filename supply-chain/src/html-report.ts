@@ -5,7 +5,7 @@
 //
 // Same `ReportInput` in, presentation-specific format out. The three
 // renderers (text, markdown, html) are deliberately independent — see
-// ADR-0008.
+// ADR-0010.
 
 import type { Finding, CheckId } from './types.ts';
 import type { ReportInput } from './report.ts';

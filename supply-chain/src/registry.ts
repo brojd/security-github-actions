@@ -4,9 +4,6 @@
 //
 // The order of each array is the order checks appear in the "Passing checks"
 // section of the rendered report.
-//
-// PR2 ships the full JS check set across two groups (static + audit). A
-// follow-up PR adds the Go ecosystem alongside the JS imports below.
 
 import type { Check } from './types.ts';
 
@@ -23,11 +20,16 @@ import { check as oidcPublishing } from './js/oidc-publishing.ts';
 import { check as cachePoisoningPublish } from './js/cache-poisoning-publish.ts';
 import { check as registryAudit } from './js/registry-audit.ts';
 
+// Go ecosystem
+import { check as gosumCommitted } from './go/gosum-committed.ts';
+import { check as goToolchainPinned } from './go/toolchain-pinned.ts';
+import { check as govulncheckClean } from './go/govulncheck-clean.ts';
+
 // Static checks: run in the `static` job at CI time (and locally by default).
 // Everything that doesn't need the network goes here — both critical and
-// non-network advisory.
+// non-network advisory, both ecosystems.
 export const STATIC_CHECKS: Check[] = [
-  // critical
+  // JS critical
   packagemanagerPinned,
   lockfileCommitted,
   lockfileConflict,
@@ -35,7 +37,11 @@ export const STATIC_CHECKS: Check[] = [
   pnpmWorkspaceCorrect,
   yarnrcCorrect,
 
-  // advisory (non-network)
+  // Go critical
+  gosumCommitted,
+  goToolchainPinned,
+
+  // JS advisory (non-network)
   installNotCi,
   npxConfusion,
   oidcPublishing,
@@ -44,8 +50,8 @@ export const STATIC_CHECKS: Check[] = [
 
 // Audit checks: run in the separate `audit` CI job (different network needs,
 // different failure semantics). Kept out of STATIC_CHECKS so the static job
-// stays offline-clean.
-export const AUDIT_CHECKS: Check[] = [registryAudit];
+// stays offline-clean. Includes both ecosystems' vulnerability scanners.
+export const AUDIT_CHECKS: Check[] = [registryAudit, govulncheckClean];
 
 // Convenience for the local entry point and one-shot survey use cases.
 export const ALL_CHECKS: Check[] = [...STATIC_CHECKS, ...AUDIT_CHECKS];

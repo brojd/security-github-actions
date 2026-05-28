@@ -1,14 +1,11 @@
 ---
 name: mitigate-supply-chain
-description: Run the grafana org's supply-chain checks against a Node.js repository and apply the suggested fixes. Use when the user says "check supply chain", "fix supply chain", "audit supply chain", "mitigate supply chain", "/mitigate-supply-chain", or "/check-npm" (legacy alias), or asks about supply-chain hardening for a specific repo. The skill wraps `npm run check` in `grafana/security-github-actions/supply-chain/` and walks the agent through fixing each finding.
+description: Run the grafana org's supply-chain checks against a Node.js or Go repository and apply the suggested fixes. Use when the user says "check supply chain", "fix supply chain", "audit supply chain", "mitigate supply chain", "/mitigate-supply-chain", or "/check-npm" (legacy alias), or asks about supply-chain hardening for a specific repo. The skill wraps `npm run check` in `grafana/security-github-actions/supply-chain/` and walks the agent through fixing each finding.
 ---
 
 # Supply-chain check & fix
 
-Run the supply-chain check against a target Node.js repository and walk the user through fixing every critical and advisory finding.
-
-> **Scope note (PR2):** the CLI currently ships the full JS check set
-> (critical + advisory). Go-ecosystem support ships in a follow-up PR.
+Run the supply-chain check against a target repository (Node.js, Go, or both) and walk the user through fixing every critical and advisory finding.
 
 ## Locate the CLI
 
@@ -25,7 +22,11 @@ Verify `package.json` and `src/check.ts` exist under the CLI dir. If `node_modul
 
 First positional argument the user provides → resolve to absolute path. If they gave none, use the current working directory.
 
-The CLI activates if any `package.json` is present in the tree. If none exists, the CLI exits cleanly with "checks skipped." Report that and stop — there's nothing to do.
+The CLI activates if **either** ecosystem signal is present:
+- JS: any `package.json` in the tree
+- Go: any `go.mod` in the tree
+
+If neither exists, the CLI exits cleanly with "checks skipped." Report that and stop — there's nothing to do. A repo can have both ecosystems; checks for each apply independently to their own roots.
 
 ## Run the check
 
@@ -65,11 +66,13 @@ Useful flags to pass after the `--` separator:
 
 Show the user a one-line summary: `N critical, M advisory across K roots`. Then for each finding, in order (critical first, then advisory, grouped by `root`):
 
-1. **Read the canonical fix guide** at `<CLI-DIR>/docs/checks/js/<check_id>.md`. The doc has the "Why," the precise fix recipe, and important subtleties (e.g. "even an empty list is a violation" for `yarnrc-correct`'s `approvedGitRepositories`). Always read this before acting — the `fix:` field on the finding is a one-liner; the doc has the full picture. The finding's `doc_link` field is also a direct URL to this same file.
+1. **Read the canonical fix guide** at `<CLI-DIR>/docs/checks/<ecosystem>/<check_id>.md` — `<ecosystem>` is `js` for npm/pnpm/yarn checks (`lockfile-committed`, `npmrc-correct`, etc.) or `go` for the Go ones (`gosum-committed`, `go-toolchain-pinned`, `govulncheck-clean`). The doc has the "Why," the precise fix recipe, and important subtleties (e.g. "even an empty list is a violation" for `yarnrc-correct`'s `approvedGitRepositories`). Always read this before acting — the `fix:` field on the finding is a one-liner; the doc has the full picture. The finding's `doc_link` field is also a direct URL to this same file, if you'd rather follow that.
 
 2. **Inspect the target's current state** of the files the fix would touch. Don't assume the file is missing just because a key is missing — partial configs are common.
 
 3. **Choose an approach** based on whether the fix is mechanical or judgement-needed:
+
+   **JS checks**
 
    | Check | Mechanical → apply directly | Judgement → ask first |
    |---|---|---|
@@ -83,7 +86,14 @@ Show the user a one-line summary: `N critical, M advisory across K roots`. Then 
    | `npx-confusion` | | ✅ ask for the correct package/scope per occurrence |
    | `oidc-publishing` | | ✅ workflow restructure + registry-side trust config — guide, don't auto-edit |
    | `cache-poisoning-publish` | ✅ add `package-manager-cache: false` to setup-node | |
-   | `registry-audit` | | ✅ each finding is a CVE in a specific dep — ask for upgrade strategy |
+
+   **Go checks**
+
+   | Check | Mechanical → apply directly | Judgement → ask first |
+   |---|---|---|
+   | `gosum-committed` | needs `go mod tidy` + `git add go.sum` — confirm before running | |
+   | `go-toolchain-pinned` | ✅ add `toolchain go1.<minor>.<patch>` directive to `go.mod` | bumping a major from below 1.22 if the team has reasons to stay older |
+   | `govulncheck-clean` | ✅ when the finding includes `fixedVersion`, run `go get <module>@<version>` then `go mod tidy` | when no fix exists — guide the user on workarounds (avoid the symbol, override) |
 
 4. **Apply the fix** with the `Edit` tool. Reference the finding's `doc_link` in your commit message / progress note if you're producing one.
 
@@ -106,9 +116,9 @@ suppressions:
     expires: 2026-12-31   # optional but encouraged
 ```
 
-Each `docs/checks/js/<id>.md` has a "Suppressing" section with the exact entry for that check.
+Each `docs/checks/<ecosystem>/<id>.md` has a "Suppressing" section with the exact entry for that check.
 
 ## When NOT to use this skill
 
-- The user asks how the checks work *in general* (no target repo) → just point them to `<CLI-DIR>/README.md` and the per-check docs under `docs/checks/js/`.
+- The user asks how the checks work *in general* (no target repo) → just point them to `<CLI-DIR>/README.md` and the per-check docs under `docs/checks/js/` and `docs/checks/go/`.
 - The user asks about CI configuration or the workflow file → that's a different concern; refer to `<CLI-DIR>/docs/adr/` and the `.github/workflows/supply-chain.yaml`.

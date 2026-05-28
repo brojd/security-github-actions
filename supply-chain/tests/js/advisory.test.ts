@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { discoverJsRoots } from '../../src/js/walk.ts';
-import type { Check, RepoContext } from '../../src/types.ts';
+import type { NodeCheck, RepoContext } from '../../src/types.ts';
 
 import { check as installNotCi } from '../../src/js/install-not-ci.ts';
 import { check as npxConfusion } from '../../src/js/npx-confusion.ts';
@@ -14,7 +14,7 @@ import { check as cachePublish } from '../../src/js/cache-poisoning-publish.ts';
 const here = dirname(fileURLToPath(import.meta.url));
 const fixturesDir = join(here, 'fixtures', 'advisory');
 
-async function runCheck(checkObj: Check, fixture: string) {
+async function runCheck(checkObj: NodeCheck, fixture: string) {
   const repoRoot = join(fixturesDir, fixture);
   const roots = await discoverJsRoots(repoRoot);
   assert.equal(roots.length, 1);
