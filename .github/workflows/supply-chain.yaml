@@ -3,14 +3,16 @@
 #
 # Architecture (see supply-chain/docs/adr/0001 and 0007):
 #   1. `detect`   — cheap activation gate. Skips the rest if no package.json.
-#   2. `static`   — runs all critical checks. Its non-zero exit on
-#                   critical findings is what gates merge.
-#   3. `report`   — depends on `static` (with `if: always()`), renders the
-#                   findings JSON, and posts the single sticky PR comment.
+#   2. `static`   — runs all critical + non-network advisory checks. Its
+#                   non-zero exit on critical findings is what gates merge.
+#   3. `audit`    — runs the network-dependent registry-audit check. Always
+#                   advisory; continue-on-error is load-bearing per ADR-0001.
+#   4. `report`   — depends on `static` + `audit` (with `if: always()`),
+#                   merges the two JSON payloads, and posts the single
+#                   sticky PR comment.
 #
-# PR1 ships only the post-install-script-disabling checks. A follow-up
-# PR adds an `audit:` job for network-dependent scanners (npm/pnpm/yarn
-# audit).
+# PR2 covers the JS ecosystem; a follow-up PR adds Go-side checks alongside
+# (the audit job will need a `setup-go` + `install govulncheck` step then).
 name: Supply-chain hardening
 
 permissions: {}
@@ -97,7 +99,7 @@ jobs:
         # continue-on-error so the artifact upload still runs even when there
         # are critical findings; the "Enforce" step re-fails the job below.
         continue-on-error: true
-        run: node --experimental-strip-types src/check.ts "$GITHUB_WORKSPACE/target"
+        run: node --experimental-strip-types src/check.ts --no-audit "$GITHUB_WORKSPACE/target"
 
       - name: Upload static findings
         # `runner.temp` lives outside GITHUB_WORKSPACE; hashFiles() can only
@@ -123,12 +125,62 @@ jobs:
         if: ${{ steps.cli.outcome == 'failure' }}
         run: exit 1
 
+  audit:
+    name: Registry audit (advisory)
+    needs: detect
+    if: ${{ needs.detect.outputs.found == 'true' }}
+    runs-on: ${{ (!github.event.repository.private || github.repository_owner != 'grafana') && 'ubuntu-latest' || 'ubuntu-arm64-small' }}
+    continue-on-error: true # load-bearing: see ADR-0001
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout target repo
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          path: target
+          persist-credentials: false
+
+      - name: Checkout security-github-actions
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          repository: ${{ (github.repository == 'grafana/security-github-actions' && github.event.pull_request.head.repo.full_name) || 'grafana/security-github-actions' }}
+          ref: ${{ (github.repository == 'grafana/security-github-actions' && github.event.pull_request.head.sha) || 'main' }}
+          path: security-github-actions
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      # `pnpm` and `yarn` are not on the GitHub runner image by default —
+      # Corepack (bundled with Node) enables both on demand based on the
+      # target repo's `packageManager:` field.
+      - name: Enable Corepack (pnpm + yarn)
+        run: corepack enable
+
+      - name: Run audit
+        working-directory: security-github-actions/supply-chain
+        env:
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SUPPLY_CHAIN_FINDINGS_OUT: ${{ runner.temp }}/audit-findings.json
+        run: node --experimental-strip-types src/check.ts --audit-only "$GITHUB_WORKSPACE/target"
+
+      - name: Upload audit findings
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: supply-chain-audit-findings
+          path: ${{ runner.temp }}/audit-findings.json
+          retention-days: 7
+          if-no-files-found: warn
+
   report:
     name: Supply-chain attacks mitigation report
     # `always()` so this runs even when `static` failed (the comment showing
     # the critical findings is the whole point). `detect` must still have
     # found something, otherwise we skip — no comment needed on non-Node repos.
-    needs: [detect, static]
+    needs: [detect, static, audit]
     if: ${{ always() && needs.detect.outputs.found == 'true' }}
     runs-on: ${{ (!github.event.repository.private || github.repository_owner != 'grafana') && 'ubuntu-latest' || 'ubuntu-arm64-small' }}
     permissions:
@@ -148,9 +200,9 @@ jobs:
         with:
           node-version: '24'
 
-      # The static artifact may legitimately be missing (the static job
-      # failed entirely before writing JSON). `if-no-files-found: warn`
-      # keeps the step green; render-cli handles missing inputs gracefully.
+      # Either artifact may legitimately be missing (a job failed entirely
+      # before writing JSON). `if-no-files-found: warn` keeps the step
+      # green; the renderer handles missing inputs gracefully.
       - name: Download static findings
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -158,14 +210,22 @@ jobs:
           path: ${{ runner.temp }}/payloads
         continue-on-error: true
 
-      - name: Render report
+      - name: Download audit findings
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: supply-chain-audit-findings
+          path: ${{ runner.temp }}/payloads
+        continue-on-error: true
+
+      - name: Render unified report
         working-directory: security-github-actions/supply-chain
         env:
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SUPPLY_CHAIN_COMMENT_OUT: ${{ runner.temp }}/comment.md
         run: |
           node --experimental-strip-types src/render-cli.ts \
-            "${{ runner.temp }}/payloads/static-findings.json"
+            "${{ runner.temp }}/payloads/static-findings.json" \
+            "${{ runner.temp }}/payloads/audit-findings.json"
 
       - name: Post sticky PR comment
         # Skip hashFiles() — runner.temp is outside GITHUB_WORKSPACE so it

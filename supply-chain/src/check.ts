@@ -4,6 +4,10 @@
 //   node --experimental-strip-types src/check.ts [flags] [path]
 //
 // Flags:
+//   --no-audit     skip the network-dependent registry-audit check
+//                  (faster, works offline; used by the CI `static` job)
+//   --audit-only   run only the registry-audit check
+//                  (used by the CI `audit` job)
 //   --format=<f>   override the stdout format. `text` (terminal-friendly,
 //                  default in a TTY), `markdown` (default when piped or in
 //                  CI), or `html` (writes to file + auto-opens browser in
@@ -17,7 +21,9 @@
 //   GITHUB_RUN_URL            — link used in the rendered report's footer
 //
 // Note: we do not write GITHUB_STEP_SUMMARY here. The render job
-// (src/render-cli.ts) is the canonical step-summary writer for CI runs.
+// (src/render-cli.ts) is the canonical step-summary writer for CI runs;
+// having the static and audit jobs each write their own would produce
+// three near-identical summaries per workflow run.
 //
 // Local default (TTY, no env sinks): full text report on stdout, HTML
 // dropped to ~/.cache/supply-chain/, browser auto-opened. Use --no-html
@@ -43,11 +49,15 @@ import { renderHtml } from './html-report.ts';
 import { runChecks, buildRunUrl } from './engine.ts';
 import { writePayload } from './io.ts';
 import { makeProgressCallback } from './progress.ts';
-import { ALL_CHECKS } from './registry.ts';
+import { STATIC_CHECKS, AUDIT_CHECKS, ALL_CHECKS } from './registry.ts';
+import type { Check } from './types.ts';
+import type { ReportPayload } from './io.ts';
 import type { ReportInput } from './report.ts';
 
+type Mode = 'all' | 'static-only' | 'audit-only';
 type Format = 'text' | 'markdown' | 'html';
 type Args = {
+  mode: Mode;
   target: string;
   format: Format | 'auto';
   noHtml: boolean;
@@ -55,12 +65,15 @@ type Args = {
 };
 
 function parseArgs(raw: string[]): Args {
+  let mode: Mode = 'all';
   let format: Format | 'auto' = 'auto';
   let noHtml = false;
   let noOpen = false;
   const positional: string[] = [];
   for (const a of raw) {
-    if (a === '--no-html') noHtml = true;
+    if (a === '--no-audit') mode = 'static-only';
+    else if (a === '--audit-only') mode = 'audit-only';
+    else if (a === '--no-html') noHtml = true;
     else if (a === '--no-open') noOpen = true;
     else if (a === '--format=text' || a === '--format=markdown' || a === '--format=html') {
       format = a.split('=')[1] as Format;
@@ -71,7 +84,7 @@ function parseArgs(raw: string[]): Args {
   }
   const cwd = env.INIT_CWD ?? env.PWD ?? '.';
   const target = resolve(positional[0] ?? cwd);
-  return { target, format, noHtml, noOpen };
+  return { mode, target, format, noHtml, noOpen };
 }
 
 function resolveStdoutFormat(requested: Format | 'auto'): Format {
@@ -108,13 +121,20 @@ async function writeHtmlReport(reportInput: ReportInput): Promise<string> {
   return path;
 }
 
-async function main(): Promise<void> {
-  const { target, format, noHtml, noOpen } = parseArgs(argv.slice(2));
+function checksForMode(mode: Mode): { checks: Check[]; source: ReportPayload['source'] } {
+  if (mode === 'static-only') return { checks: STATIC_CHECKS, source: 'static' };
+  if (mode === 'audit-only') return { checks: AUDIT_CHECKS, source: 'audit' };
+  return { checks: ALL_CHECKS, source: 'static' };
+}
 
-  stderr.write(`supply-chain: checking ${target}\n`);
+async function main(): Promise<void> {
+  const { mode, target, format, noHtml, noOpen } = parseArgs(argv.slice(2));
+  const { checks, source } = checksForMode(mode);
+
+  stderr.write(`supply-chain: checking ${target} (${mode})\n`);
 
   const onProgress = makeProgressCallback(stderr);
-  const result = await runChecks(target, ALL_CHECKS, onProgress);
+  const result = await runChecks(target, checks, onProgress);
 
   if (result.rootCount === 0) {
     stdout.write('No package.json found; supply-chain checks skipped.\n');
@@ -128,17 +148,24 @@ async function main(): Promise<void> {
     runUrl: env.GITHUB_RUN_URL ?? buildRunUrl(),
   };
 
-  // CI sink: JSON payload that the render job downloads and renders.
+  // CI sink: JSON payload that the render job downloads and merges.
+  // We intentionally do NOT write GITHUB_STEP_SUMMARY here even when it's
+  // set — that would produce a per-job summary (one for static, one for
+  // audit) duplicating what the render job's unified summary already
+  // contains. The render job is the single canonical writer of step
+  // summaries; the static/audit jobs are silent on that surface.
   const findingsOut = env.SUPPLY_CHAIN_FINDINGS_OUT;
   if (findingsOut) {
     await writePayload(findingsOut, {
-      source: 'static',
+      source,
       ran: result.ran,
       findings: result.active,
       suppressed: result.suppressed,
     });
-  } else {
-    // Local flow (no CI sink).
+  }
+
+  // Local flow (no CI sink).
+  if (!findingsOut) {
     const fmt = resolveStdoutFormat(format);
 
     // 1. Render to stdout per the chosen format. `--format=html` in a TTY

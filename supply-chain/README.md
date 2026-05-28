@@ -17,7 +17,8 @@ workspace member). Failures appear in:
 - a **sticky PR comment** that updates on every push
 
 If the workflow says you have a **critical** finding, you must fix it (or
-file a [suppression](#suppressions)) before merge.
+file a [suppression](#suppressions)) before merge. **Advisory** findings
+appear in the same comment but do not block merging.
 
 You can also run the exact same checks on a local clone — no CI needed:
 `cd supply-chain && npm install && npm run check -- /path/to/repo`. See
@@ -25,22 +26,30 @@ You can also run the exact same checks on a local clone — no CI needed:
 
 ## What gets checked
 
-> **Scope note (PR1):** this PR ships a deliberately narrow subset of the
-> org hardening guide — the four checks needed to enforce **post-install-
-> script disabling** across npm, pnpm, and yarn. The remaining JS checks
-> (`lockfile-committed`, `lockfile-conflict`, full versions of the
-> `*-correct` keysets, the heuristic checks, `registry-audit`) and Go
-> support ship in follow-up PRs. See
-> [ADR-0003](./docs/adr/0003-v1-check-scope.md).
+> **Scope note (PR2):** this PR ships the full JS check set. Go-ecosystem
+> support ships in a follow-up PR. See
+> [ADR-0003](./docs/adr/0003-v1-check-scope.md) for the rollout split.
 
 ### Critical (fail merge if violated)
 
 | ID | What it checks |
 |---|---|
 | `packagemanager-pinned` | `package.json` declares `packageManager:` at or above the minimum version. |
-| `npmrc-correct` | npm roots have `.npmrc` with `ignore-scripts=true`. |
-| `pnpm-workspace-correct` | pnpm roots have `pnpm-workspace.yaml` with `strictDepBuilds: true`. |
-| `yarnrc-correct` | yarn roots have `.yarnrc.yml` with `enableScripts: false`. |
+| `lockfile-committed` | The lockfile for the declared package manager exists and is committed. |
+| `lockfile-conflict` | A root contains at most one lockfile (no half-finished migrations). |
+| `npmrc-correct` | npm roots have a complete `.npmrc` with `ignore-scripts`, `allow-git`, `min-release-age`. |
+| `pnpm-workspace-correct` | pnpm roots have `pnpm-workspace.yaml` with `minimumReleaseAge`, `strictDepBuilds`, `blockExoticSubdeps`. |
+| `yarnrc-correct` | yarn roots have `.yarnrc.yml` with `enableScripts: false`, `enableImmutableInstalls`, `npmMinimalAgeGate`, and no `approvedGitRepositories`. |
+
+### Advisory (PR comment only, never blocks merge)
+
+| ID | What it checks |
+|---|---|
+| `install-not-ci` | Workflows / Dockerfiles / Tiltfile / Makefile / mise.toml / shell scripts use the lockfile-strict install command (`npm ci`, `--frozen-lockfile`, `--immutable`). |
+| `npx-confusion` | `npx <name>` invocations use either an allowlisted bare name, a scoped name, or `--package`. |
+| `oidc-publishing` | Workflows that call `npm/pnpm/yarn publish` use OIDC trusted publishing (`id-token: write`, no long-lived tokens). |
+| `cache-poisoning-publish` | Publishing workflows disable `actions/setup-node`'s package-manager cache. |
+| `registry-audit` | Surfaces high/critical advisories from `npm/pnpm/yarn audit`. |
 
 See [docs/checks/js/](./docs/checks/js/) for the per-check fix guide. Each
 finding in the PR comment links to its check's doc page directly.
@@ -108,6 +117,9 @@ npm run check
 
 # Check a specific local clone:
 npm run check -- /path/to/some/other/repo
+
+# Skip the network-dependent registry-audit check (faster, works offline):
+npm run check -- --no-audit /path/to/some/repo
 ```
 
 ### Output format
@@ -158,9 +170,12 @@ for repo in $(gh repo list grafana --limit 100 --json nameWithOwner -q '.[].name
     gh repo clone "$repo" "${repo##*/}" -- --depth 1 2>/dev/null || continue
     echo "=== $repo ==="
     ( cd ~/dev/security-github-actions/supply-chain && \
-      npm run check --silent -- "/tmp/sc-scan/${repo##*/}" ) | head -30
+      npm run check --silent -- --no-audit "/tmp/sc-scan/${repo##*/}" ) | head -30
 done
 ```
+
+`--no-audit` is recommended for surveys: it keeps the loop fast and avoids
+hammering the registry with audit requests.
 
 ## For developers of this tool
 
@@ -192,11 +207,14 @@ supply-chain/
     # JS-specific (a follow-up PR adds src/go/ alongside)
     js/
       walk.ts             # discoverJsRoots()
-      _config-helpers.ts
+      scanner.ts          # workflow/Dockerfile/etc. scanner for heuristic checks
+      _audit-parse.ts, _config-helpers.ts
       packagemanager-pinned.ts
-      npmrc-correct.ts
-      pnpm-workspace-correct.ts
-      yarnrc-correct.ts
+      lockfile-committed.ts, lockfile-conflict.ts
+      npmrc-correct.ts, pnpm-workspace-correct.ts, yarnrc-correct.ts
+      install-not-ci.ts, npx-confusion.ts
+      oidc-publishing.ts, cache-poisoning-publish.ts
+      registry-audit.ts
   tests/
     js/
       walk.test.ts, packagemanager-pinned.test.ts, …
@@ -207,26 +225,33 @@ supply-chain/
       js/<check_id>.md    # per-check fix guide
 ```
 
-### Workflow architecture (3 jobs, 1 CLI)
+### Workflow architecture (4 jobs, 1 CLI)
 
-PR1 ships two real jobs (`static` + `report`) gated by the `detect`
-activation gate; a follow-up PR adds an `audit` job for the
-network-dependent `registry-audit` check.
+The workflow runs three real jobs (`static` + `audit` + `report`) gated by
+the `detect` activation gate, all driven by the same `src/check.ts`
+invoked with different mode flags:
 
 ```
-detect ──► static ──► report
-              check.ts             render-cli.ts + post-comment.ts
-              (critical → exit 1)
+              ┌─────────────────────────────────────┐  static-findings.json
+              │ static                               │
+              │   check.ts --no-audit                │──────────────┐
+              │   (critical → exit 1)                │              │
+              └─────────────────────────────────────┘              ▼
+detect ──┬─►                                                 ┌──────────┐
+         │    ┌─────────────────────────────────────┐        │ report   │
+         │    │ audit                                │  audit │          │
+         └─►  │   check.ts --audit-only              │──────► │          │
+              │   (continue-on-error: true)          │        └──────────┘
+              └─────────────────────────────────────┘        render-cli.ts
+                                                              + post-comment.ts
 ```
 
 - **`detect`** — cheap activation gate; skips the rest if no `package.json`.
-- **`static`** — runs all critical checks across all roots. Non-zero exit on critical findings is what fails the workflow and gates merge. Writes `static-findings.json`.
-- **`report`** — `if: always()` on `static`. Downloads the artifact, renders the markdown body via `render-cli.ts`, posts/updates the sticky PR comment via `post-comment.ts`.
+- **`static`** runs `check.ts --no-audit`. Every non-network check across all roots. Its **non-zero exit on critical findings is what fails the workflow** and gates merge. Writes `static-findings.json`.
+- **`audit`** runs `check.ts --audit-only`. Only `registry-audit`. **Always advisory** at the job level (`continue-on-error: true` — ADR-0001). Writes `audit-findings.json`.
+- **`report`** depends on `[detect, static, audit]` with `if: always()`. Downloads both artifacts, runs `render-cli.ts` to merge the payloads and produce one markdown body, then `post-comment.ts` posts/updates the sticky PR comment.
 
-The same `check.ts` is what runs locally via `npm run check`. CI mode vs
-local mode is determined by environment variables: if
-`SUPPLY_CHAIN_FINDINGS_OUT` is set, it writes the JSON payload; otherwise it
-prints the rendered report to stdout.
+The same `check.ts` (with no flags) is what runs locally via `npm run check`. CI mode vs local mode is determined entirely by environment variables: if `SUPPLY_CHAIN_FINDINGS_OUT` is set, it writes the JSON payload; otherwise it prints the rendered report to stdout.
 
 ### Adding a new check
 
@@ -234,7 +259,7 @@ prints the rendered report to stdout.
 2. Add `src/js/<check_id>.ts` exporting `check: NodeCheck` with `ecosystem: 'js'`.
 3. Add fixtures under `tests/js/fixtures/<check_id>/` — at least one `good-*` and one `bad-*`. The fixtures must be real directory trees; the test invokes `discoverJsRoots` against them and feeds the resulting root into `check.run`.
 4. Add `tests/js/<check_id>.test.ts` asserting the findings count, the `check_id`, and key message fragments. Test against *behavior* (returned findings), not *implementation* (specific source strings).
-5. Register the check in `src/registry.ts`'s `ALL_CHECKS` array.
+5. Register the check in `src/registry.ts`'s `STATIC_CHECKS` or `AUDIT_CHECKS` array.
 6. Write `docs/checks/js/<check_id>.md` — this is what the finding's `doc_link` points at. Should explain: what failed, why we check it, and the precise fix.
 
 ### Design decisions
@@ -247,7 +272,7 @@ contract with the org.
 
 The workflow is **not** referenced by the org ruleset yet. The rollout plan:
 
-1. Land PR1 (post-install-script enforcement) + follow-up PRs (rest of JS, then Go).
+1. Land PR1 (post-install-script enforcement) → PR2 (rest of JS, this PR) → PR3 (Go support).
 2. Run a one-off pre-flight: clone the top-N org repos and run the CLI against each from a developer laptop. Tally findings.
 3. Communicate the findings to affected teams with a deadline.
 4. After deadline, add `supply-chain.yaml@main` to the org ruleset.
