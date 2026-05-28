@@ -30,7 +30,11 @@ export const check: NodeCheck = {
     let rawOutput: string | null = null;
     let invocationError: string | null = null;
     try {
-      const { stdout } = await execFileP(cmd.argv0, cmd.args, { cwd, maxBuffer: 64 * 1024 * 1024 });
+      const { stdout } = await execFileP(cmd.argv0, cmd.args, {
+        cwd,
+        maxBuffer: 64 * 1024 * 1024,
+        env: sanitizedEnv(),
+      });
       rawOutput = stdout;
     } catch (err) {
       // Audit commands exit non-zero when vulnerabilities are found; execFile
@@ -141,6 +145,40 @@ function auditCommand(pm: PackageManager): Cmd {
     case 'pnpm':
       return { argv0: 'pnpm', args: ['audit', '--json'] };
     case 'yarn':
+      // Yarn Berry's `yarn npm audit` defaults to direct deps and top-level
+      // workspace only. `--recursive` walks into workspace members, `--all`
+      // includes transitive deps — together they match npm/pnpm coverage.
       return { argv0: 'yarn', args: ['npm', 'audit', '--recursive', '--all', '--json'] };
   }
+}
+
+// Audit subprocesses don't need registry tokens or CI credentials. Drop them
+// defensively so a future bug or malicious package-manager hook can't ship
+// them off-host. Keep only what the package manager actually needs to find
+// its binaries, resolve its home dir, and emit JSON to stdout.
+function sanitizedEnv(): NodeJS.ProcessEnv {
+  const keep: ReadonlyArray<string> = [
+    'PATH',
+    'HOME',
+    'USER',
+    'LANG',
+    'LC_ALL',
+    'TMPDIR',
+    'TEMP',
+    'TMP',
+    'SHELL',
+    'COREPACK_HOME',
+    'NODE_OPTIONS',
+    'NODE_PATH',
+    'APPDATA',
+    'LOCALAPPDATA',
+    'PROGRAMFILES',
+    'SYSTEMROOT',
+  ];
+  const env: NodeJS.ProcessEnv = {};
+  for (const k of keep) {
+    const v = process.env[k];
+    if (typeof v === 'string') env[k] = v;
+  }
+  return env;
 }

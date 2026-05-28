@@ -64,8 +64,8 @@ function parseV2(obj: unknown): Advisory[] | null {
     for (const v of viaList) {
       // Strings in `via` point at another package's entry — we'll emit
       // that advisory when we process that package's vulnerabilities row.
-      if (typeof v === 'string') continue;
-      if (v === null || typeof v !== 'object') continue;
+      // Anything else non-object (numbers, booleans, null) is malformed; skip.
+      if (typeof v !== 'object' || v === null) continue;
       const adv = v as {
         title?: string;
         url?: string;

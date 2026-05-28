@@ -75,3 +75,13 @@ test('lockfile present on disk AND in trackedFiles => no finding', async () => {
   });
   assert.deepEqual(findings, []);
 });
+
+// Lockfile-conflict is a separate check; lockfile-committed must stay quiet
+// when both lockfiles are present so the comment doesn't double-fire.
+test('two lockfiles present (conflict territory) => stays quiet', async () => {
+  const repoRoot = join(here, 'fixtures', 'walk', 'lockfile-conflict');
+  const roots = await discoverJsRoots(repoRoot);
+  assert.equal(roots.length, 1);
+  const findings = await check.run(roots[0]!, { repoRoot, trackedFiles: null });
+  assert.deepEqual(findings, []);
+});

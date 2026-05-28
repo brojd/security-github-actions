@@ -164,3 +164,59 @@ test('clean audit (zero vulnerabilities) returns []', () => {
   });
   assert.deepEqual(parseAuditOutput(clean), []);
 });
+
+test('npm v1: missing patched_versions => patchedRange is undefined', () => {
+  const v1 = JSON.stringify({
+    advisories: {
+      '42': {
+        module_name: 'leftpad',
+        severity: 'high',
+        title: 'Pad the wrong side',
+        vulnerable_versions: '<1.0.0',
+        // patched_versions intentionally absent
+      },
+    },
+  });
+  const out = parseAuditOutput(v1);
+  assert.equal(out.length, 1);
+  assert.equal(out[0]!.package, 'leftpad');
+  assert.equal(out[0]!.patchedRange, undefined);
+});
+
+test('yarn NDJSON: lowercase children keys still parse', () => {
+  const yarnLower = JSON.stringify({
+    value: 'semver',
+    children: {
+      issue: 'Regular Expression Denial of Service',
+      severity: 'high',
+      url: 'https://github.com/advisories/GHSA-c2qf-rxjj-qqgw',
+      vulnerable_versions: '<7.5.2',
+    },
+  });
+  const out = parseAuditOutput(yarnLower);
+  assert.equal(out.length, 1);
+  assert.equal(out[0]!.package, 'semver');
+  assert.equal(out[0]!.severity, 'high');
+  assert.equal(out[0]!.title, 'Regular Expression Denial of Service');
+  assert.equal(out[0]!.url, 'https://github.com/advisories/GHSA-c2qf-rxjj-qqgw');
+  assert.equal(out[0]!.vulnerableRange, '<7.5.2');
+});
+
+test('npm v2: non-object non-string via entries are skipped', () => {
+  // Defends the parser against malformed `via` arrays — numbers / booleans /
+  // null should be ignored, not emitted as bogus advisories.
+  const malformed = JSON.stringify({
+    auditReportVersion: 2,
+    vulnerabilities: {
+      weird: {
+        name: 'weird',
+        severity: 'high',
+        range: '*',
+        via: [42, true, null, { name: 'weird', severity: 'high', title: 'Real one', range: '*' }],
+      },
+    },
+  });
+  const out = parseAuditOutput(malformed);
+  assert.equal(out.length, 1);
+  assert.equal(out[0]!.title, 'Real one');
+});

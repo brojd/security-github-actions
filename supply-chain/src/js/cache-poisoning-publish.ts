@@ -50,20 +50,28 @@ function hasPublishCall(file: ScannedFile): boolean {
 
 type StepReport = { line: number; cacheDisabled: boolean };
 
-// Find each setup-node use site and examine the `with:` block immediately
-// following it. We approximate "the with: block" as "the next ~15 indented
-// lines after the uses: line". Crude, but adequate at advisory severity.
+// Find each setup-node use site and examine the `with:` block belonging to
+// the enclosing step. We bound the scan by indent: the step starts at column
+// `stepCol` (the column of `-` on the step's first line, or the column of
+// `uses:` if it's the first key of the step), and the step's body is every
+// following line whose indent is strictly greater than `stepCol`. We stop at
+// the first sibling — a line starting with `-` at column `<= stepCol` — or
+// at a top-level key. Nested lists and multi-line scalars inside `with:`
+// keep going because their indent stays deeper than `stepCol`.
 function analyseSetupNodeSteps(file: ScannedFile): StepReport[] {
   const reports: StepReport[] = [];
   for (let i = 0; i < file.lines.length; i++) {
     const line = file.lines[i]!;
     if (!SETUP_NODE_RE.test(line)) continue;
+    const stepCol = findStepCol(file.lines, i);
     let cacheDisabled = true; // default: no `cache:` at all => OK
-    for (let j = i + 1; j < Math.min(file.lines.length, i + 16); j++) {
+    for (let j = i + 1; j < file.lines.length; j++) {
       const inner = file.lines[j]!;
-      // Stop if dedented (next step) — heuristic: a line starting with `- ` at
-      // the same indent as the `- uses:` we matched.
-      if (/^\s*- /.test(inner) && inner !== file.lines[i]) break;
+      if (inner.trim() === '' || /^\s*#/.test(inner)) continue;
+      const col = leadingSpaces(inner);
+      // Stop at a sibling step (`-` at same-or-lower indent) or a dedent
+      // past the step entirely (any non-list line at `<= stepCol`).
+      if (col <= stepCol) break;
       if (PACKAGE_MANAGER_CACHE_FALSE.test(inner)) {
         cacheDisabled = true;
         break;
@@ -80,4 +88,23 @@ function analyseSetupNodeSteps(file: ScannedFile): StepReport[] {
     reports.push({ line: i + 1, cacheDisabled });
   }
   return reports;
+}
+
+function leadingSpaces(line: string): number {
+  let n = 0;
+  while (n < line.length && line[n] === ' ') n++;
+  return n;
+}
+
+// The "step column" is the indent of the `-` that introduces this step. If
+// the matched line already begins with `- ` (one-line step `- uses: …`), use
+// its own indent. Otherwise walk back to the closest preceding `- …` line.
+function findStepCol(lines: readonly string[], i: number): number {
+  const own = lines[i]!.match(/^(\s*)-\s/);
+  if (own) return own[1]!.length;
+  for (let k = i - 1; k >= 0; k--) {
+    const m = lines[k]!.match(/^(\s*)-\s/);
+    if (m) return m[1]!.length;
+  }
+  return 0;
 }
